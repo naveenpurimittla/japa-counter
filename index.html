@@ -5,6 +5,9 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>🙏 Japa Counter - Spiritual Mantra Counter</title>
     <meta name="description" content="Complete spiritual counting companion for mantra japa practice with 108 beads counter">
+    <meta name="theme-color" content="#ea580c">
+    <link rel="manifest" href="manifest.json">
+    <link rel="apple-touch-icon" href="icons/icon-192.png">
     <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
     <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
     <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
@@ -164,6 +167,7 @@
           const [lotusAnimation, setLotusAnimation] = useState(false);
           const [dbReady, setDbReady] = useState(false);
           const [storageMode, setStorageMode] = useState('pending');
+          const [installPromptEvent, setInstallPromptEvent] = useState(null);
 
           const mantraCategories = {
             popular: [
@@ -481,6 +485,37 @@
           };
 
           useEffect(() => {
+            if ('serviceWorker' in navigator) {
+              navigator.serviceWorker.register('./service-worker.js').catch((error) => {
+                console.error('Service worker registration failed:', error);
+              });
+            }
+          }, []);
+
+          useEffect(() => {
+            const beforeInstallHandler = (event) => {
+              event.preventDefault();
+              setInstallPromptEvent(event);
+            };
+
+            const installedHandler = () => {
+              setInstallPromptEvent(null);
+            };
+
+            window.addEventListener('beforeinstallprompt', beforeInstallHandler);
+            window.addEventListener('appinstalled', installedHandler);
+
+            if (window.matchMedia && window.matchMedia('(display-mode: standalone)').matches) {
+              setInstallPromptEvent(null);
+            }
+
+            return () => {
+              window.removeEventListener('beforeinstallprompt', beforeInstallHandler);
+              window.removeEventListener('appinstalled', installedHandler);
+            };
+          }, []);
+
+          useEffect(() => {
             const initStorage = async () => {
               if (supportsIndexedDB()) {
                 try {
@@ -653,6 +688,21 @@
             return [...categoryMantras, ...customMantras, 'Custom Mantra'];
           };
 
+          const handleInstallClick = async () => {
+            if (!installPromptEvent) {
+              return;
+            }
+            installPromptEvent.prompt();
+            try {
+              const { outcome } = await installPromptEvent.userChoice;
+              if (outcome === 'accepted') {
+                setInstallPromptEvent(null);
+              }
+            } catch (error) {
+              console.error('Install prompt failed:', error);
+            }
+          };
+
           const getSessionDuration = () => {
             if (!sessionStartTime) return '0m';
             const minutes = Math.floor((Date.now() - sessionStartTime) / 1000 / 60);
@@ -705,12 +755,22 @@
                       <h1 className={`text-3xl font-bold ${textPrimary} mb-2`}>🙏 Japa Counter</h1>
                       <p className={textSecondary}>Complete spiritual counting companion</p>
                     </div>
-                    <button
-                      onClick={() => setTheme(theme === 'light' ? 'dark' : 'light')}
-                      className={`${textSecondary} hover:scale-110 transition-transform`}
-                    >
-                      {theme === 'light' ? <Moon size={24} /> : <Sun size={24} />}
-                    </button>
+                    <div className="flex items-center gap-2">
+                      {installPromptEvent && (
+                        <button
+                          onClick={handleInstallClick}
+                          className="bg-green-500 hover:bg-green-600 text-white text-xs font-semibold px-3 py-2 rounded-lg shadow-sm transition-transform hover:scale-105"
+                        >
+                          Install App
+                        </button>
+                      )}
+                      <button
+                        onClick={() => setTheme(theme === 'light' ? 'dark' : 'light')}
+                        className={`${textSecondary} hover:scale-110 transition-transform`}
+                      >
+                        {theme === 'light' ? <Moon size={24} /> : <Sun size={24} />}
+                      </button>
+                    </div>
                   </div>
 
                   <div className={`flex justify-between items-center mb-4 ${theme === 'dark' ? 'bg-slate-600' : 'bg-orange-50'} rounded-xl p-3`}>
