@@ -163,6 +163,7 @@
           const [customMantras, setCustomMantras] = useState([]);
           const [lotusAnimation, setLotusAnimation] = useState(false);
           const [dbReady, setDbReady] = useState(false);
+          const [storageMode, setStorageMode] = useState('pending');
 
           const mantraCategories = {
             popular: [
@@ -257,9 +258,57 @@
           // IndexedDB Setup
           const DB_NAME = 'JapaCounterDB';
           const DB_VERSION = 1;
+          const LOCAL_STORAGE_KEYS = {
+            customMantras: 'japa_custom_mantras',
+            favorites: 'japa_favorites'
+          };
           let db = null;
 
+          const supportsIndexedDB = () => {
+            try {
+              return typeof window !== 'undefined' && !!window.indexedDB;
+            } catch (error) {
+              console.warn('IndexedDB check failed:', error);
+              return false;
+            }
+          };
+
+          const loadFromLocalStorage = (key) => {
+            if (typeof window === 'undefined' || !window.localStorage) {
+              return [];
+            }
+            try {
+              const raw = window.localStorage.getItem(key);
+              return raw ? JSON.parse(raw) : [];
+            } catch (error) {
+              console.error('Failed to read from localStorage:', error);
+              return [];
+            }
+          };
+
+          const saveToLocalStorage = (key, value) => {
+            if (typeof window === 'undefined' || !window.localStorage) {
+              return;
+            }
+            try {
+              window.localStorage.setItem(key, JSON.stringify(value));
+            } catch (error) {
+              console.error('Failed to persist to localStorage:', error);
+            }
+          };
+
+          const requestToPromise = (request) => {
+            return new Promise((resolve, reject) => {
+              request.onsuccess = () => resolve(request.result);
+              request.onerror = () => reject(request.error);
+            });
+          };
+
           const openDatabase = () => {
+            if (!supportsIndexedDB()) {
+              return Promise.reject(new Error('IndexedDB is not available in this browser'));
+            }
+
             return new Promise((resolve, reject) => {
               const request = indexedDB.open(DB_NAME, DB_VERSION);
 
@@ -292,99 +341,173 @@
           };
 
           const saveCustomMantraDB = (mantra) => {
+            if (!mantra) {
+              return Promise.resolve();
+            }
+
+            if (storageMode === 'localStorage' || !supportsIndexedDB()) {
+              const stored = loadFromLocalStorage(LOCAL_STORAGE_KEYS.customMantras);
+              if (!stored.includes(mantra)) {
+                saveToLocalStorage(LOCAL_STORAGE_KEYS.customMantras, [...stored, mantra]);
+              }
+              return Promise.resolve();
+            }
+
             return new Promise((resolve, reject) => {
+              if (!db) {
+                reject(new Error('Database is not ready'));
+                return;
+              }
+
               const transaction = db.transaction(['customMantras'], 'readwrite');
               const store = transaction.objectStore('customMantras');
-              const request = store.add({ mantra: mantra, createdAt: new Date().toISOString() });
 
-              request.onsuccess = () => {
-                console.log('Custom mantra saved:', mantra);
-                resolve();
+              transaction.onerror = () => {
+                console.error('Transaction failed while saving custom mantra');
+                reject(transaction.error);
               };
 
-              request.onerror = () => {
-                console.error('Error saving custom mantra');
-                reject(request.error);
-              };
+              requestToPromise(store.add({ mantra: mantra, createdAt: new Date().toISOString() }))
+                .then(() => {
+                  console.log('Custom mantra saved:', mantra);
+                  resolve();
+                })
+                .catch((error) => {
+                  console.error('Error saving custom mantra');
+                  reject(error);
+                });
             });
           };
 
           const loadCustomMantrasDB = () => {
+            if (storageMode === 'localStorage' || !supportsIndexedDB() || !db) {
+              const stored = loadFromLocalStorage(LOCAL_STORAGE_KEYS.customMantras);
+              console.log('Custom mantras loaded from localStorage:', stored);
+              return Promise.resolve(stored);
+            }
+
             return new Promise((resolve, reject) => {
               const transaction = db.transaction(['customMantras'], 'readonly');
               const store = transaction.objectStore('customMantras');
-              const request = store.getAll();
 
-              request.onsuccess = () => {
-                const mantras = request.result.map(item => item.mantra);
-                console.log('Custom mantras loaded:', mantras);
-                resolve(mantras);
+              transaction.onerror = () => {
+                console.error('Transaction failed while loading custom mantras');
+                reject(transaction.error);
               };
 
-              request.onerror = () => {
-                console.error('Error loading custom mantras');
-                reject(request.error);
-              };
+              requestToPromise(store.getAll())
+                .then((result) => {
+                  const mantras = result.map(item => item.mantra);
+                  console.log('Custom mantras loaded:', mantras);
+                  resolve(mantras);
+                })
+                .catch((error) => {
+                  console.error('Error loading custom mantras');
+                  reject(error);
+                });
             });
           };
 
           const saveFavoritesDB = (favoritesList) => {
-            return new Promise(async (resolve, reject) => {
-              try {
-                const transaction = db.transaction(['favorites'], 'readwrite');
-                const store = transaction.objectStore('favorites');
-                
-                await store.clear();
-                
-                for (const fav of favoritesList) {
-                  await store.add({ mantra: fav });
-                }
-                
+            if (storageMode === 'localStorage' || !supportsIndexedDB()) {
+              saveToLocalStorage(LOCAL_STORAGE_KEYS.favorites, favoritesList);
+              console.log('Favorites saved to localStorage:', favoritesList);
+              return Promise.resolve();
+            }
+
+            return new Promise((resolve, reject) => {
+              if (!db) {
+                reject(new Error('Database is not ready'));
+                return;
+              }
+
+              const transaction = db.transaction(['favorites'], 'readwrite');
+              const store = transaction.objectStore('favorites');
+              let settled = false;
+
+              const finish = () => {
+                if (settled) return;
+                settled = true;
                 console.log('Favorites saved:', favoritesList);
                 resolve();
-              } catch (error) {
+              };
+
+              const fail = (error) => {
+                if (settled) return;
+                settled = true;
                 console.error('Error saving favorites');
                 reject(error);
-              }
+              };
+
+              transaction.oncomplete = finish;
+              transaction.onerror = () => fail(transaction.error);
+
+              requestToPromise(store.clear())
+                .then(() => {
+                  const ops = favoritesList.map((fav) => requestToPromise(store.put({ mantra: fav })));
+                  return Promise.all(ops);
+                })
+                .catch(fail);
             });
           };
 
           const loadFavoritesDB = () => {
+            if (storageMode === 'localStorage' || !supportsIndexedDB() || !db) {
+              const stored = loadFromLocalStorage(LOCAL_STORAGE_KEYS.favorites);
+              console.log('Favorites loaded from localStorage:', stored);
+              return Promise.resolve(stored);
+            }
+
             return new Promise((resolve, reject) => {
               const transaction = db.transaction(['favorites'], 'readonly');
               const store = transaction.objectStore('favorites');
-              const request = store.getAll();
 
-              request.onsuccess = () => {
-                const favs = request.result.map(item => item.mantra);
-                console.log('Favorites loaded:', favs);
-                resolve(favs);
+              transaction.onerror = () => {
+                console.error('Transaction failed while loading favorites');
+                reject(transaction.error);
               };
 
-              request.onerror = () => {
-                console.error('Error loading favorites');
-                reject(request.error);
-              };
+              requestToPromise(store.getAll())
+                .then((result) => {
+                  const favs = result.map(item => item.mantra);
+                  console.log('Favorites loaded:', favs);
+                  resolve(favs);
+                })
+                .catch((error) => {
+                  console.error('Error loading favorites');
+                  reject(error);
+                });
             });
           };
 
           useEffect(() => {
-            const initDB = async () => {
-              try {
-                await openDatabase();
-                setDbReady(true);
-                
-                const loadedCustomMantras = await loadCustomMantrasDB();
-                const loadedFavorites = await loadFavoritesDB();
-                
-                setCustomMantras(loadedCustomMantras);
-                setFavorites(loadedFavorites);
-              } catch (error) {
-                console.error('Error initializing database:', error);
+            const initStorage = async () => {
+              if (supportsIndexedDB()) {
+                try {
+                  await openDatabase();
+                  setStorageMode('indexeddb');
+                  setDbReady(true);
+
+                  const loadedCustomMantras = await loadCustomMantrasDB();
+                  const loadedFavorites = await loadFavoritesDB();
+
+                  setCustomMantras(loadedCustomMantras);
+                  setFavorites(loadedFavorites);
+                  return;
+                } catch (error) {
+                  console.error('Error initializing IndexedDB. Falling back to localStorage.', error);
+                }
               }
+
+              const storedCustomMantras = loadFromLocalStorage(LOCAL_STORAGE_KEYS.customMantras);
+              const storedFavorites = loadFromLocalStorage(LOCAL_STORAGE_KEYS.favorites);
+              setStorageMode('localStorage');
+              setDbReady(true);
+              setCustomMantras(storedCustomMantras);
+              setFavorites(storedFavorites);
             };
 
-            initDB();
+            initStorage();
             setMotivationalQuote(motivationalQuotes[Math.floor(Math.random() * motivationalQuotes.length)]);
           }, []);
 
